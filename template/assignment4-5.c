@@ -41,6 +41,10 @@ double g_time_in_secs = 0;
 double g_processor_frequency = 1600000000.0; // processing speed for BG/Q
 unsigned long long g_start_cycles=0;
 unsigned long long g_end_cycles=0;
+double threshold = 0.25;
+int total_ticks = 256;
+
+double dim = 32768;
 
 // You define these
 
@@ -61,6 +65,10 @@ int main(int argc, char *argv[])
 //    int i = 0;
     int mpi_myrank;
     int mpi_commsize;
+
+    unsigned long long start_cycle = 0;
+    unsigned long long end_cycle = 0;
+
 // Example MPI startup and using CLCG4 RNG
     MPI_Init( &argc, &argv);
     MPI_Comm_size( MPI_COMM_WORLD, &mpi_commsize);
@@ -73,8 +81,16 @@ int main(int argc, char *argv[])
 // You must replace mpi_myrank with the right row being used.
 // This just show you how to call the RNG.    
     printf("Rank %d of %d has been started and a first Random Value of %lf\n", 
-	   mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
+       mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
     
+    if(mpi_myrank == 0){
+        start_time =  GetTimeBase();
+    }
+
+    int my_rank_chunk
+
+    pthread_t tid[];
+
     MPI_Barrier( MPI_COMM_WORLD );
     
 // Insert your code
