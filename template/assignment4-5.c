@@ -13,7 +13,7 @@
 #include<errno.h>
 #include<math.h>
 
-#include<clcg4.h>
+#include"clcg4.h"
 
 #include<mpi.h>
 #include<pthread.h>
@@ -42,6 +42,13 @@ double g_processor_frequency = 1600000000.0; // processing speed for BG/Q
 unsigned long long g_start_cycles=0;
 unsigned long long g_end_cycles=0;
 
+pthread_barrier_t send_barrier;
+pthread_barrier_t recv_barrier;
+pthread_barrier_t mpi_thread_barrier;
+pthread_barrier_t rank_sum_barrier;
+
+pthread_mutex_t rank_alive_lock;
+
 int total_ticks = 256;
 
 double dim = 32768;
@@ -51,8 +58,14 @@ typedef struct arg_t{
     int** chunk;
     int start_row;
     int end_row;
+    int dim;
+
     int mpi_myrank;
+    int rows_per_rank;
     int thread_num;
+    int num_ticks;
+    unsigned long long* rank_alive_cells;
+
     double threshold;
     int* recv_row;
     int* send_row;
@@ -63,7 +76,428 @@ typedef struct arg_t{
 /***************************************************************************/
 
 // You define these
-void * process_row(void* arg);
+int check_neighbors(int row, int col, int dim, int** chunk, int* recv_row, int* send_row){
+    int num_neighbs = 0;
+    if(row == start_row){
+        if(col == 0){
+            //Neighbor to the left
+            if(chunk[row][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+            //Neighbor to the right
+            if(chunk[row][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper left diagonal neighbor
+            if(recv_row[dim-1] == ALIVE){   
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(recv_row[col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(chunk[row+1][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(chunk[row+1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+        }
+        else if(col == dim-1){
+            //Neighbor to the right
+            if(chunk[row][0] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Neighbor to the left
+            if(chunk[row][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(recv_row[0] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Uppper left diagonal neighbor
+            if(recv_row[col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(chunk[row+1][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(chunk[row+1][0] == ALIVE){
+                num_neighbs++;
+            }
+        }
+        else{
+            if(chunk[row][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            if(chunk[row][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(recv_row[col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Uppper left diagonal neighbor
+            if(recv_row[col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(chunk[row+1][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(chunk[row+1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+        }
+
+        //Neighbor above current cell
+        if(recv_row[col] == ALIVE){
+            num_neighbs++;
+        }
+        //Neighbor below
+        if(chunk[row+1][col] == ALIVE){
+            num_neighbs++;
+        }
+
+        return num_neighbs;
+    }
+    else if(row == end_row){
+        if(col == 0){
+            //Neighbor to the left
+            if(chunk[row][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+            //Neighbor to the right
+            if(chunk[row][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(send_row[dim-1] == ALIVE){   
+                num_neighbs++;
+            }
+            //Lower right diagonal neighbor
+            if(send_row[col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper left diagonal neighbor
+            if(chunk[row-1][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(chunk[row-1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+        }
+        else if(row == 0){
+            //Neighbor to the right
+            if(chunk[row][0] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Neighbor to the left
+            if(chunk[row][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(send_row[0] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(send_row[col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper left diagonal neighbor
+            if(chunk[row-1][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(chunk[row-1][0] == ALIVE){
+                num_neighbs++;
+            }
+        }
+        else{
+            if(chunk[row][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            if(chunk[row][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(send_row[col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(send_row[col-1] == ALIVE){
+                num_neighbs++;
+            }
+            //Upper left diagonal neighbor
+            if(chunk[row-1][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(chunk[row-1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+        }
+        //Neighbor above current cell
+        if(chunk[row+1][col] == ALIVE){
+            num_neighbs++;
+        }
+        //Neighbor below
+        if(send_row[col] == ALIVE){
+            num_neighbs++;
+        }
+
+        return num_neighbs;
+
+    }
+    else{
+        if(col == 0){
+            //Neighbor to the left
+            if(chunk[row][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+            //Neighbor to the right
+            if(chunk[row][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper left diagonal neighbor
+            if(chunk[row-1][dim-1] == ALIVE){   
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(chunk[row-1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(chunk[row+1][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(chunk[row+1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+        }
+        else if(col == dim-1){
+            //Neighbor to the right
+            if(chunk[row][0] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Neighbor to the left
+            if(chunk[row][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(chunk[row+1][0] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Uppper left diagonal neighbor
+            if(chunk[row+1][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(chunk[row+1][dim-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(chunk[row+1][0] == ALIVE){
+                num_neighbs++;
+            }
+        }
+
+        else{
+            if(chunk[row][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            if(chunk[row][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Upper right diagonal neighbor
+            if(chunk[row-1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Uppper left diagonal neighbor
+            if(chunk[row-1][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower left diagonal neighbor
+            if(chunk[row+1][col-1] == ALIVE){
+                num_neighbs++;
+            }
+
+            //Lower right diagonal neighbor
+            if(chunk[row+1][col+1] == ALIVE){
+                num_neighbs++;
+            }
+        }
+
+        //Neighbor above current cell
+        if(chunk[row-1][col] == ALIVE){
+            num_neighbs++;
+        }
+        //Neighbor below
+        if(chunk[row+1][col] == ALIVE){
+            num_neighbs++;
+        }
+
+        return num_neighbs;
+    }
+}
+
+void * process_rows(void* arg){
+    arg_t thread_arg = *(arg_t *) arg;
+
+    int cur_row = thread_arg.start_row;
+    int** chunk = thread_arg.chunk;
+    int* recv_row = thread_arg.recv_row;
+    int* send_row = thread_arg.send_row;
+    
+    //Initialize our RNG stream
+    InitDefault();
+
+    //All cells are alive initially
+    int thread_alive_cells = dim * (thread_arg.end_row - thread_arg.start_row);
+
+    if(thread_arg.thread_num == 0){
+        int* thread_alive_cells = (int *) calloc(thread_arg.num_ticks, sizeof(int));
+    }
+
+    for(int i = 0; i < total_ticks; i++){
+        //Communicate ghost ranks
+        if(thread_arg.thread_num == 0 && mpi_myrank != mpi_commsize - 1){
+            MPI_Isend(recv_row, dim, MPI_INT, 0, 0 MPI_COMM_WORLD, &send_request);    
+        }
+
+        else if(thread_arg.thread_num == 0){
+            MPI_Isend(recv_row, dim, MPI_INT, mpi_myrank + 1, 0, MPI_COMM_WORLD, &send_request);
+        }
+
+        if(thread_arg.thread_num == 0 && mpi_myrank == 0){
+            MPI_Irecv(recv_row, dim, MPI_INT, mpi_commsize - 1, 0, MPI_COMM_WORLD, &recv_request);
+        }
+
+        else if(thread_arg.thread_num == 0){
+            MPI_Irecv(recv_row, dim, MPI_INT, mpi_myrank - 1, 0, MPI_COMM_WORLD, &recv_request);
+        }
+
+        //Wait for all recieves to go through
+        MPI_Wait(&recv_request, &status);
+        pthread_barrier_wait(&recv_barrier);
+
+        //Go through all the assigned rows for this thread
+        for(unsigned int j = start_row; j < end_row; j++){
+            for(unsigned int k = 0; k < dim; k++){
+                //calculate the number of alive neighbors 
+                int num_neighbs = 0;
+                num_neighbs = check_neighbors(j, k, dim, chunk, recv_row, send_row);
+                
+                //RNG + threshold
+                double val = GenVal(j + (thread_arg.rows_per_rank * mpi_myrank));
+                if(val > thread_arg.threshold){
+                    if(chunk[j][k] == ALIVE){
+                        if(num_neighbs < 2){
+                            chunk[j][k] = DEAD;
+                            thread_alive_cells--;
+                        }
+                        else if(num_neighbs > 3){
+                            chunk[j][k] = DEAD;
+                            thread_alive_cells--;
+                        }
+                    }
+
+                    else{
+                        if(num_neighbs == 3){
+                            chunk[j][k] = ALIVE;
+                            thread_alive_cells++;
+                        }
+                    }
+                }
+                
+                else{
+                    val = GenVal(j + (thread_arg.rows_per_rank * mpi_myrank));
+                    //Cell becomes alive
+                    if(val < 0.5){
+                        if(chunk[j][k] == DEAD){
+                            chunk[j][k] = ALIVE;
+                            thread_alive_cells++;
+                        }
+                    }
+                    //Cell becomes dead
+                    else{
+                        if(chunk[j][k]) == ALIVE){
+                            chunk[j][k] = DEAD;
+                            thread_alive_cells--;
+                        }
+                    }
+                }
+            }
+        }
+
+        //Have all threads add the number alive in their rows to the rank total
+        pthread_mutex_lock(&rank_alive_lock);
+        rank_alive_cells[tick] += thread_alive_cells;
+        pthread_mutex_unlock(&rank_alive_lock);
+
+        //Wait for everyone to get here
+        MPI_Barrier(MPI_COMM_WORLD);
+        pthread_barrier_wait(&mpi_thread_barrier);
+    }  
+
+    //Make sure all threads have finished updating rows
+    pthread_barrier_wait(&mpi_thread_barrier);
+
+    //Return the array with alive cells per tick
+    if(thread_arg.thread_num == 0){
+        pthread_exit(thread_alive_cells);
+    }
+    else{
+        return NULL;
+    }
+}
 
 /***************************************************************************/
 /* Function: Main **********************************************************/
@@ -96,93 +530,140 @@ int main(int argc, char *argv[])
     printf("Rank %d of %d has been started and a first Random Value of %lf\n", 
        mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
 
+    unsigned long long* rank_alive_cells = (long long *) calloc(num_ticks, sizeof(long long));
+    unsigned long long global_alive_cells;
+
+
     if(mpi_myrank == 0){
-        start_time =  GetTimeBase();
+        start_cycle =  GetTimeBase();
+        global_alive_cells = (long long *) calloc(num_ticks, sizeof(long long));
     }
 
-    int** my_rank_chunk = (int **) calloc(dim/mpi_commsize, sizeof(int *);
-    for(unsigned int i = 0; i < dim/mpi_commsize){
+    int** my_rank_chunk = (int **) calloc(dim/mpi_commsize, sizeof(int *));
+    for(unsigned int i = 0; i < dim/mpi_commsize; i++){
         my_rank_chunk[i] = (int *) calloc(dim, sizeof(int));
         for(unsigned int j = 0; j < dim; j++){
-            my_rank_chunk[j] = ALIVE;
+            my_rank_chunk[i][j] = ALIVE;
         }
     }
 
     int* recv_row = (int *) calloc(dim, sizeof(int));
     int* send_row = (int *) calloc(dim, sizeof(int));
+    for(unsigned int i = 0; i < dim; i++){
+        recv_row[i] = ALIVE;
+        send_row[i] = ALIVE;
+    }
 
     pthread_t tid[num_threads];
-      
+    
+    pthread_barrier_init(&send_barrier, NULL, num_threads);
+    pthread_barrier_init(&recv_barrier, NULL, num_threads);
+    pthread_barrier_init(&mpi_thread_barrier, NULL, num_threads);
+    pthread_barrier_init(&rank_sum_barrier, NULL, num_threads);
+
+    pthread_mutex_init(&rank_alive_lock, NULL);
+
     MPI_Request send_request, recv_request;
     MPI_Status status;
 
     int* alive_cells
     if(mpi_myrank == 0){
         alive_cells = (int *) calloc(total_ticks, sizeof(int));
+    }  
+
+    int rows_per_thread = dim/mpi_commsize/num_threads;
+
+
+
+    for(int j = 0; j < num_threads; j++){
+        arg_t thread_arg;
+        thread_arg.start_row = j * rows_per_thread;
+        thread_arg.end_row = (j + 1) * rows_per_thread - 1;
+        thread_arg.chunk = my_rank_chunk;
+        thread_arg.dim = dim;
+
+        thread_arg.mpi_myrank = mpi_myrank;
+        thread_arg.rows_per_rank = dim/mpi_commsize;
+        thread_arg.thread_num = j;
+        thread_arg.num_ticks = num_threads;
+        thread_arg.rank_alive_cells = rank_alive_cells;
+
+        thread_arg.threshold = threshold;
+        thread_arg.recv_row = recv_row;
+        thread_arg.send_row = send_row;
+
+        pthread_create(tid[j], process_rows, (void *) thread_arg);
     }
 
-    for(int i = 0; i < total_ticks; i++){
-        //Communicate ghost ranks
-        if(mpi_myrank != mpi_commsize - 1){
-            MPI_Isend(recv_row, dim, MPI_INT, 0, 0 MPI_COMM_WORLD, &send_request);    
-        }
-        else{
-            MPI_Isend(recv_row, dim, MPI_INT, mpi_myrank + 1, 0, MPI_COMM_WORLD, &send_request);
-        }
+    unsigned long long* thread_alive_cells;
+    for(int j = 0; j < num_threads; j++){
+        pthread_join(tid[j], NULL);
+    } 
 
-        if(mpi_myrank == 0){
-            MPI_Irecv(recv_row, dim, MPI_INT, mpi_commsize - 1, 0, MPI_COMM_WORLD, &recv_request);
-        }
-        else{
-            MPI_Irecv(recv_row, dim, MPI_INT, mpi_myrank - 1, 0, MPI_COMM_WORLD, &recv_request);
-        }
-        
-        MPI_Wait(&recv_request, &status);
-    
-        int rows_per_thread = dim/mpi_commsize/num_threads;
+    //Sum the arrays for every tick
+    MPI_Reduce(rank_alive_cells, global_alive_cells, num_ticks, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
-        unsigned long long rank_alive_cells = 0;
-        unsigned long long global_alive_cells = 0;
-        for(int j = 0; j < num_threads; j++){
-            int* thread_alive_cells;
-
-            arg_t thread_arg;
-            thread_arg.start_row = j * rows_per_thread;
-            thread_arg.end_row = (j + 1) * rows_per_thread - 1;
-            thread_arg.chunk = my_rank_chunk;
-            pthread_create(tid[j], process_row, (void *) thread_arg);
-        }
-
-        for(int j = 0; j < num_threads; j++){
-            pthread_join(tid[j], (void **) &thread_alive_cells);
-            rank_alive_cells += *thread_alive_cells;
-            free(thread_alive_cells);
-            thread_alive_cells = NULL;
-        }
-
-        MPI_Reduce(&rank_alive_cells, &global_alive_cells, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
-        if(mpi_myrank == 0){
-            alive_cells[i] = global_alive_cells;
-        }
-
-        MPI_Barrier(MPI_COMM_WORLD);
-    }   
-
-    MPI_Barrier( MPI_COMM_WORLD );
+    //MPI_Barrier( MPI_COMM_WORLD );
     if(mpi_myrank == 0){
         end_cycle = GetTimeBase();
     }
 
-    if(exper_type){
+    unsigned long long io_start cycle;
+    unsigned long long io_end_cycle;
+    if(exper_type == 1){
+        if(mpi_myrank == 0)
+            io_start_cycle = GetTimeBase();
 
+        MPI_File fh;
+        MPI_File_open(MPI_COMM_WORLD, "universe.txt", MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+        
+        for(int i = 0; i < dim/mpi_commsize; i++){
+            MPI_File_write_at(fh, i + (rows_per_rank * mpi_myrank), chunk[i], dim, MPI_LONG_LONG, &status);
+        }
+        MPI_File_close(&fh);
+
+        if(mpi_myrank == 0)
+            io_end_cycle = GetTimeBase();
+
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 
-    if(exper_type){
+    if(exper_type == 2){
+        int heatmap_rows = rows_per_rank / 32;
+        int** heatmap = (int **) calloc(rows_per_rank/32, sizeof(int *));
+        for(unsigned int i = 0; i < heatmap_rows; i++){
+            heatmap[i] = (int *) calloc(1024, sizeof(int));
+        }
+
+        for(unsigned int i = 0; i < rows_per_rank; i++){
+            for(unsigned int j = 0; j < dim; j++){
+                heatmap[i/32][j/32] += my_rank_chunk[i][j];
+            }
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_File fh;
+        MPI_File_open(MPI_COMM_WORLD, "heatmap.txt", MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+
+        for(int i = 0; i < heatmap_rows; i++){
+            MPI_File_write_at(fh, i + (heatmap_rows * mpi_myrank), heatmap[i], 1024, MPI_INT, &status);
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+
+    if(mpi_myrank == 0){
+        for(unsigned int i = 0; i < num_ticks; i++){
+            printf("Tick %d, %llu cells alive\n", global_alive_cells[i]);
+        }
+
+        printf("Simulation complete in %d seconds\n", ((double) (end_cycles - start_cycles)) / processor_frequency);
+
+        if(exper_type == 1){
+            printf("IO complete in %d seconds\n", ((double) (io_end_cycles - io_start_cycles)) / processor_frequency);
+        }
 
     }
-// Insert your code
-    
-
 // END -Perform a barrier and then leave MPI
     MPI_Barrier( MPI_COMM_WORLD );
     MPI_Finalize();
