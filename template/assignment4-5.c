@@ -47,21 +47,20 @@ pthread_mutex_t rank_alive_lock;
 
 //int total_ticks = 256;
 
-double dim = 32768;
+int dim = 1024;
 
 // You define these
 typedef struct arg_t{
     int** chunk;
     int start_row;
     int end_row;
-    int dim;
 
     int mpi_myrank;
     int mpi_commsize;
     int rows_per_rank;
     int thread_num;
     int num_ticks;
-    unsigned long long* rank_alive_cells;
+    unsigned int* rank_alive_cells;
 
     double threshold;
     int* recv_row;
@@ -71,9 +70,33 @@ typedef struct arg_t{
 /***************************************************************************/
 /* Function Decs ***********************************************************/
 /***************************************************************************/
+arg_t* create_thread_arg(int** my_chunk, int my_start_row, int my_end_row, int my_mpi_myrank, 
+                        int my_mpi_commsize, int my_rows_per_rank, int my_thread_num, int my_num_ticks, 
+                        unsigned int* my_rank_alive_cells, double my_threshold, int* my_recv_row, int* my_send_row){
+
+    arg_t* thread_arg = (arg_t *) malloc(sizeof(thread_arg));
+
+    thread_arg->chunk = my_chunk;
+    thread_arg->start_row = my_start_row;
+    thread_arg->end_row = my_end_row;
+
+    thread_arg->mpi_myrank = my_mpi_myrank;
+    thread_arg->mpi_commsize = my_mpi_commsize;
+    thread_arg->rows_per_rank = my_rows_per_rank;
+    thread_arg->thread_num = my_thread_num;
+    thread_arg->num_ticks = my_num_ticks;
+    thread_arg->rank_alive_cells = my_rank_alive_cells;
+
+    thread_arg->threshold = my_threshold;
+    thread_arg->recv_row = my_recv_row;
+    thread_arg->send_row = my_send_row;
+
+    return thread_arg;
+}
+
 
 // You define these
-int check_neighbors(int row, int col, int dim, int** chunk, int rows_per_rank, int* recv_row, int* send_row){
+int check_neighbors(int row, int col, int** chunk, int rows_per_rank, int* recv_row, int* send_row){
     int num_neighbs = 0;
     if(row == 0){
         if(col == 0){
@@ -396,8 +419,9 @@ void * process_rows(void * arg){
     int** chunk = thread_arg.chunk;
     int* recv_row = thread_arg.recv_row;
     int* send_row = thread_arg.send_row;
-    unsigned long long* rank_alive_cells = thread_arg.rank_alive_cells;
+    unsigned int* rank_alive_cells = thread_arg.rank_alive_cells;
     
+    printf("thread number %d with start_row: %d started\n", thread_arg.thread_num, thread_arg.start_row);
 
     MPI_Request send_request, recv_request;
     MPI_Status status;
@@ -406,27 +430,40 @@ void * process_rows(void * arg){
 
     //All cells are alive initially
     int thread_alive_cells = dim * (thread_arg.end_row - thread_arg.start_row);
-
+    printf("Entering main loop\n");
     for(int i = 0; i < num_ticks; i++){
         //Communicate ghost ranks
-        if(thread_arg.thread_num == 0 && mpi_myrank != mpi_commsize - 1){
-            MPI_Isend(recv_row, dim, MPI_INT, 0, 0, MPI_COMM_WORLD, &send_request);    
-        }
+        printf("thread %d Checking if should do send/recv\n", thread_arg.thread_num);
+        if(thread_arg.thread_num == 0 && mpi_commsize > 1){
+            printf("Doing sends and recieves\n");
+            if(mpi_myrank != mpi_commsize - 1){
+                MPI_Isend(recv_row, dim, MPI_INT, 0, 0, MPI_COMM_WORLD, &send_request);    
+            }
 
-        else if(thread_arg.thread_num == 0){
-            MPI_Isend(recv_row, dim, MPI_INT, mpi_myrank + 1, 0, MPI_COMM_WORLD, &send_request);
-        }
+            else{
+                MPI_Isend(recv_row, dim, MPI_INT, mpi_myrank + 1, 0, MPI_COMM_WORLD, &send_request);
+            }
 
-        if(thread_arg.thread_num == 0 && mpi_myrank == 0){
-            MPI_Irecv(recv_row, dim, MPI_INT, mpi_commsize - 1, 0, MPI_COMM_WORLD, &recv_request);
-        }
+            if(mpi_myrank == 0){
+                MPI_Irecv(recv_row, dim, MPI_INT, mpi_commsize - 1, 0, MPI_COMM_WORLD, &recv_request);
+            }
 
-        else if(thread_arg.thread_num == 0){
-            MPI_Irecv(recv_row, dim, MPI_INT, mpi_myrank - 1, 0, MPI_COMM_WORLD, &recv_request);
+            else{
+                MPI_Irecv(recv_row, dim, MPI_INT, mpi_myrank - 1, 0, MPI_COMM_WORLD, &recv_request);
+            }
         }
 
         //Wait for all recieves to go through
-        MPI_Wait(&recv_request, &status);
+        if(thread_arg.thread_num == 0 && mpi_commsize > 1){
+            printf("About to wait\n");
+            MPI_Wait(&recv_request, &status);
+            printf("Done with waiting\n");
+        }
+
+
+        if(mpi_myrank == 0 && thread_arg.thread_num == 0){
+            printf("Done with sends/recieves\n");
+        }
         pthread_barrier_wait(&recv_barrier);
 
         //Go through all the assigned rows for this thread
@@ -434,7 +471,7 @@ void * process_rows(void * arg){
             for(unsigned int k = 0; k < dim; k++){
                 //calculate the number of alive neighbors 
                 int num_neighbs = 0;
-                num_neighbs = check_neighbors(j, k, dim, chunk, rows_per_rank, recv_row, send_row);
+                num_neighbs = check_neighbors(j, k, chunk, rows_per_rank, recv_row, send_row);
                 
                 //RNG + threshold
                 double val = GenVal(j + (thread_arg.rows_per_rank * mpi_myrank));
@@ -488,6 +525,7 @@ void * process_rows(void * arg){
         pthread_barrier_wait(&mpi_thread_barrier);
     }  
 
+    printf("Done with main loop\n");
     //Make sure all threads have finished updating rows
     pthread_barrier_wait(&mpi_thread_barrier);
 
@@ -534,15 +572,14 @@ int main(int argc, char *argv[])
 // Note, used the mpi_myrank to select which RNG stream to use.
 // You must replace mpi_myrank with the right row being used.
 // This just show you how to call the RNG.    
-    printf("Rank %d of %d has been started and a first Random Value of %lf\n", 
-       mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
+    printf("Rank %d of %d has been started and a first Random Value of %lf\n", mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
 
-    unsigned long long* rank_alive_cells = (unsigned long long *) calloc(num_ticks, sizeof(unsigned long long));
-    unsigned long long* global_alive_cells;
+    unsigned int* rank_alive_cells = (unsigned int *) calloc(num_ticks, sizeof(unsigned int));
+    unsigned int* global_alive_cells = NULL;
 
     if(mpi_myrank == 0){
         start_cycle =  GetTimeBase();
-        global_alive_cells = (unsigned long long *) calloc(num_ticks, sizeof(unsigned long long));
+        global_alive_cells = (unsigned int*) calloc(num_ticks, sizeof(unsigned int));
     }
 
     int** my_rank_chunk = (int **) calloc(dim/mpi_commsize, sizeof(int *));
@@ -560,6 +597,7 @@ int main(int argc, char *argv[])
         send_row[i] = ALIVE;
     }
 
+    printf("Hi\n");
     pthread_t tid[num_threads];
     
     pthread_barrier_init(&send_barrier, NULL, num_threads);
@@ -574,42 +612,33 @@ int main(int argc, char *argv[])
     int rows_per_thread = dim/mpi_commsize/num_threads;
     unsigned int rows_per_rank = dim/mpi_commsize;
 
-
     for(int j = 0; j < num_threads; j++){
-        arg_t thread_arg;
-        thread_arg.start_row = j * rows_per_thread;
-        thread_arg.end_row = (j + 1) * rows_per_thread - 1;
-        thread_arg.chunk = my_rank_chunk;
-        thread_arg.dim = dim;
 
-        thread_arg.mpi_myrank = mpi_myrank;
-        thread_arg.mpi_commsize = mpi_commsize;
-        thread_arg.rows_per_rank = dim/mpi_commsize;
-        thread_arg.thread_num = j;
-        thread_arg.num_ticks = num_ticks;
-        thread_arg.rank_alive_cells = rank_alive_cells;
-
-        thread_arg.threshold = threshold;
-        thread_arg.recv_row = recv_row;
-        thread_arg.send_row = send_row;
-
-        pthread_create(&tid[j], NULL, process_rows, &thread_arg);
+        
+        arg_t* thread_arg = create_thread_arg(my_rank_chunk, j * rows_per_thread, (j + 1) * rows_per_thread - 1, mpi_myrank, mpi_commsize, dim/mpi_commsize,
+                                            0 + j, num_ticks, rank_alive_cells, threshold, recv_row, send_row);
+        
+        
+        printf("THread number %d with start row %d about to start\n", thread_arg->thread_num, j * rows_per_thread);
+        pthread_create(&tid[j], NULL, process_rows, thread_arg);
     }
+    printf("Done creating threads\n");
 
     for(int j = 0; j < num_threads; j++){
         pthread_join(tid[j], NULL);
     } 
+    printf("Rank: %d finished simulation ticks\n", mpi_myrank);
 
     //Sum the arrays for every tick
-    MPI_Reduce(rank_alive_cells, global_alive_cells, num_ticks, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(rank_alive_cells, global_alive_cells, num_ticks, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     //MPI_Barrier( MPI_COMM_WORLD );
     if(mpi_myrank == 0){
         end_cycle = GetTimeBase();
     }
 
-    unsigned long long io_start_cycle;
-    unsigned long long io_end_cycle;
+    unsigned long long io_start_cycle = 0;
+    unsigned long long io_end_cycle = 0;
     if(exper_type == 1){
         if(mpi_myrank == 0)
             io_start_cycle = GetTimeBase();
@@ -618,7 +647,7 @@ int main(int argc, char *argv[])
         MPI_File_open(MPI_COMM_WORLD, "universe.txt", MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
         
         for(int i = 0; i < dim/mpi_commsize; i++){
-            MPI_File_write_at(fh, i + (rows_per_rank * mpi_myrank), my_rank_chunk[i], dim, MPI_LONG_LONG, &status);
+            MPI_File_write_at(fh, i + (rows_per_rank * mpi_myrank), my_rank_chunk[i], dim, MPI_INT, &status);
         }
         MPI_File_close(&fh);
 
@@ -654,7 +683,7 @@ int main(int argc, char *argv[])
 
     if(mpi_myrank == 0){
         for(int i = 0; i < num_ticks; i++){
-            printf("Tick %d, %llu cells alive\n", i, global_alive_cells[i]);
+            printf("Tick %d, %ud cells alive\n", i, global_alive_cells[i]);
         }
 
         printf("Simulation complete in %e seconds\n", ((double) (end_cycle - start_cycle)) / processor_frequency);
