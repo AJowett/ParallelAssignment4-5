@@ -33,7 +33,7 @@
 #define ALIVE 1
 #define DEAD  0
 
-#define dim 1024
+#define dim 128
 /***************************************************************************/
 /* Global Vars *************************************************************/
 /***************************************************************************/
@@ -222,6 +222,11 @@ void * process_rows(void * arg){
                 MPI_Irecv(ghost_row_above, dim, MPI_INT, mpi_myrank - 1, 0, MPI_COMM_WORLD, &recv_request1);
         
             MPI_Wait(&recv_request1, &status);
+            for(unsigned int i = 0; i < dim; i++){
+                printf("rank: %d, thread: %d ghost_row_above: \n", mpi_myrank, thread_num);
+                printf("%d\n", ghost_row_above[i]);
+            }
+            printf("\n");
         }
         
         pthread_barrier_wait(&recv_barrier1);
@@ -241,6 +246,11 @@ void * process_rows(void * arg){
                 MPI_Irecv(ghost_row_below, dim, MPI_INT, mpi_myrank - 1, 0, MPI_COMM_WORLD, &recv_request2);
         
             MPI_Wait(&recv_request2, &status);
+            printf("rank: %d, thread: %d ghost_row_above: \n", mpi_myrank, thread_num);
+            for(unsigned int i = 0; i < dim; i++){
+                printf("%d\n", ghost_row_below[i]);
+            }
+            printf("\n");
         }
         
         pthread_barrier_wait(&recv_barrier2);
@@ -251,6 +261,8 @@ void * process_rows(void * arg){
                 double val = GenVal(i);
                 if(val > threshold){
                     int num_neighbs = count_neighbs(i, j, chunk);
+                    printf("rank: %d, thread: %d, row: %d, col: %d, num_neighbs: %d\n", mpi_myrank, thread_num, i, j, num_neighbs);
+
                     if(chunk[i][j] == ALIVE){
                         if(num_neighbs < 2 || num_neighbs > 3){
                             chunk[i][j] = DEAD;
@@ -259,7 +271,7 @@ void * process_rows(void * arg){
                     }
 
                     else{
-                        if(num_neighbs > 3){
+                        if(num_neighbs == 3){
                             chunk[i][j] = ALIVE;
                             num_alive_thread++;
                         }
@@ -267,7 +279,7 @@ void * process_rows(void * arg){
                 }
 
                 else{
-                    val = GenVal(i + (dim/mpi_commsize * num_threads));
+                    val = GenVal(i);
                     if(val < 0.5 && chunk[i][j] == ALIVE){
                         chunk[i][j] = DEAD;
                         num_alive_thread--;
@@ -292,8 +304,8 @@ void * process_rows(void * arg){
         pthread_barrier_wait(&add_barrier);
 
         if(thread_num == 0){
-            printf("rank %d: %llu alive at tick %d\n", mpi_myrank, );
             pthread_mutex_lock(&rank_alive_lock);
+            printf("rank %d: %llu alive at tick %d\n", mpi_myrank, num_alive_rank, tick);
             rank_alive_cells[tick] = num_alive_rank;
             pthread_mutex_unlock(&rank_alive_lock);
         }
@@ -332,7 +344,7 @@ int main(int argc, char *argv[])
 // You must replace mpi_myrank with the right row being used.
 // This just show you how to call the RNG.    
     printf("Rank %d of %d has been started and a first Random Value of %lf\n", 
-	   mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
+       mpi_myrank, mpi_commsize, GenVal(mpi_myrank));
     
     MPI_Barrier( MPI_COMM_WORLD );
     
@@ -384,15 +396,51 @@ int main(int argc, char *argv[])
     for(unsigned int i = 0; i < num_threads; i++){
         pthread_join(tid[i], NULL);
     }
+
     if(mpi_myrank == 0){
         g_end_cycles = GetTimeBase();
     }
 
-    MPI_Reduce(rank_alive_cells, global_alive_cells, num_ticks, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(rank_alive_cells, global_alive_cells, num_ticks, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if(mpi_myrank == 0){
         for(unsigned int tick = 0; tick < num_ticks; tick++){
             printf("Num alive at tick %d: %llu \n", tick, global_alive_cells[tick]);
+        }
+
+        printf("Simulation complete in %f seconds\n", ((double) (g_end_cycles - g_start_cycles)) / g_processor_frequency);
+    }
+
+    if(exper_type == 1){
+        if(mpi_myrank == 0){
+            g_start_cycles = GetTimeBase();
+        }
+
+        MPI_Status status;
+        MPI_File fh;
+        MPI_File_open(MPI_COMM_WORLD, "universe.txt", MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fh);
+        
+        unsigned long long rank_offset;
+        unsigned long long row_offset;
+        unsigned long long col_offset;
+        for(unsigned int i = 0; i < rows_per_rank; i++){
+            /*
+            for(unsigned int j = 0; j < dim; j++){
+                rank_offset = mpi_myrank * rows_per_rank * dim * sizeof(int);
+                row_offset = i * dim * sizeof(int);
+                col_offset = j * sizeof(int);
+                MPI_File_write_at(fh, rank_offset + row_offset + col_offset, chunk[i], dim, MPI_INT, &status);
+            }
+            */
+        }
+        MPI_File_close(&fh);
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        if(mpi_myrank == 0){
+            g_end_cycles = GetTimeBase();
+            printf("Parallel io complete in %f seconds\n", ((double) (g_end_cycles - g_start_cycles)) / g_processor_frequency);
+
         }
     }
 
